@@ -1,0 +1,290 @@
+import AppKit
+import SwiftUI
+
+@main
+struct MainEntry {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        // Menu bar only — no Dock icon (also set LSUIElement in Info.plist)
+        app.setActivationPolicy(.accessory)
+        app.run()
+    }
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var statusItem: NSStatusItem?
+    private var popover: NSPopover?
+    private var settingsWindow: NSWindow?
+
+    private let store = HistoryStore()
+    private let monitor = ClipboardMonitor()
+
+    private var settingsObserver: NSObjectProtocol?
+    private var itemCountObserver: NSKeyValueObservation?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        buildMainMenu()
+        setupStatusItem()
+        setupPopover()
+        monitor.start(store: store)
+
+        settingsObserver = NotificationCenter.default.addObserver(
+            forName: .clipKeepSettingsChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.updateStatusItemAppearance()
+            }
+        }
+
+        // Refresh badge when history changes
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.updateStatusItemAppearance()
+            }
+        }
+
+        updateStatusItemAppearance()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        monitor.stop()
+        if let settingsObserver {
+            NotificationCenter.default.removeObserver(settingsObserver)
+        }
+    }
+
+    // MARK: - Status item
+
+    private func setupStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = item.button {
+            button.image = NSImage(
+                systemSymbolName: "clipboard",
+                accessibilityDescription: "ClipKeep"
+            )
+            button.image?.isTemplate = true
+            button.action = #selector(togglePopover(_:))
+            button.target = self
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        }
+        statusItem = item
+    }
+
+    private func updateStatusItemAppearance() {
+        guard let button = statusItem?.button else { return }
+        if store.settings.showCountInMenuBar, store.items.count > 0 {
+            button.title = " \(store.items.count)"
+        } else {
+            button.title = ""
+        }
+        if monitor.isPaused {
+            button.image = NSImage(
+                systemSymbolName: "clipboard.fill",
+                accessibilityDescription: "ClipKeep (paused)"
+            )
+            button.contentTintColor = .systemOrange
+        } else {
+            button.image = NSImage(
+                systemSymbolName: "clipboard",
+                accessibilityDescription: "ClipKeep"
+            )
+            button.contentTintColor = nil
+        }
+        button.image?.isTemplate = true
+    }
+
+    private func setupPopover() {
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = true
+        popover.contentSize = NSSize(width: 380, height: 480)
+        popover.contentViewController = NSHostingController(
+            rootView: HistoryPanelView(
+                store: store,
+                monitor: monitor,
+                onCopy: { [weak self] item in
+                    self?.copyItem(item)
+                },
+                onOpenSettings: { [weak self] in
+                    self?.closePopover()
+                    self?.openSettings()
+                },
+                onQuit: {
+                    NSApp.terminate(nil)
+                }
+            )
+        )
+        self.popover = popover
+    }
+
+    @objc private func togglePopover(_ sender: Any?) {
+        // Right-click → quick menu
+        if let event = NSApp.currentEvent, event.type == .rightMouseUp {
+            showStatusMenu()
+            return
+        }
+
+        guard let button = statusItem?.button, let popover else { return }
+        if popover.isShown {
+            popover.performClose(sender)
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            // Keep key for search field
+            popover.contentViewController?.view.window?.makeKey()
+        }
+    }
+
+    private func closePopover() {
+        popover?.performClose(nil)
+    }
+
+    private func showStatusMenu() {
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Open ClipKeep", action: #selector(openFromMenu), keyEquivalent: "")
+        menu.addItem(NSMenuItem.separator())
+        let pauseTitle = monitor.isPaused ? "Resume Capturing" : "Pause Capturing"
+        menu.addItem(withTitle: pauseTitle, action: #selector(togglePause), keyEquivalent: "")
+        menu.addItem(withTitle: "Settings…", action: #selector(openSettingsAction), keyEquivalent: ",")
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(withTitle: "Clear Unpinned", action: #selector(clearUnpinned), keyEquivalent: "")
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(withTitle: "Quit ClipKeep", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        for item in menu.items {
+            item.target = self
+        }
+        statusItem?.menu = menu
+        statusItem?.button?.performClick(nil)
+        // Detach so left-click uses popover again
+        DispatchQueue.main.async { [weak self] in
+            self?.statusItem?.menu = nil
+        }
+    }
+
+    @objc private func openFromMenu() {
+        guard let button = statusItem?.button, let popover else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    }
+
+    @objc private func togglePause() {
+        monitor.setPaused(!monitor.isPaused)
+        updateStatusItemAppearance()
+    }
+
+    @objc private func openSettingsAction() {
+        openSettings()
+    }
+
+    @objc private func clearUnpinned() {
+        store.clearUnpinned()
+    }
+
+    private func copyItem(_ item: ClipboardItem) {
+        monitor.copyToPasteboard(item)
+        // Brief feedback: close popover after copy (feels like paste menu)
+        closePopover()
+    }
+
+    // MARK: - Settings window
+
+    private func openSettings() {
+        if let settingsWindow, settingsWindow.isVisible {
+            settingsWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let root = SettingsView(
+            store: store,
+            monitor: monitor,
+            onClose: { [weak self] in
+                self?.settingsWindow?.close()
+            }
+        )
+        let hosting = NSHostingController(rootView: root)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 640),
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "ClipKeep Settings"
+        window.contentViewController = hosting
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow = window
+    }
+
+    // MARK: - Menu bar app menu (for Cmd+Q etc. when key)
+
+    private func buildMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu()
+        appMenuItem.submenu = appMenu
+        appMenu.addItem(
+            withTitle: "About ClipKeep",
+            action: #selector(showAbout),
+            keyEquivalent: ""
+        )
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(
+            withTitle: "Settings…",
+            action: #selector(openSettingsAction),
+            keyEquivalent: ","
+        )
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(
+            withTitle: "Quit ClipKeep",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenuItem.submenu = editMenu
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        for item in appMenu.items {
+            if item.action == #selector(showAbout) || item.action == #selector(openSettingsAction) {
+                item.target = self
+            }
+        }
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func showAbout() {
+        let info: [NSApplication.AboutPanelOptionKey: Any] = [
+            .applicationName: "ClipKeep",
+            .applicationVersion: "1.0.0",
+            .version: "1",
+            .credits: NSAttributedString(
+                string: "Menu bar clipboard history with privacy exclusions for password managers.",
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 11),
+                    .foregroundColor: NSColor.secondaryLabelColor,
+                ]
+            ),
+        ]
+        NSApp.orderFrontStandardAboutPanel(options: info)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
