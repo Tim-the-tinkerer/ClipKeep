@@ -61,16 +61,16 @@ final class ClipboardMonitor: ObservableObject {
                 wrote = true
             }
         case .image:
-            if let data = item.imagePNGData, let image = NSImage(data: data) {
+            let data = store?.imageData(for: item) ?? item.imagePNGData
+            if let data, let image = NSImage(data: data) {
                 pb.writeObjects([image])
                 wrote = true
             }
         case .files:
-            let urls = item.filePaths.map { URL(fileURLWithPath: $0) }.filter {
-                FileManager.default.fileExists(atPath: $0.path)
-            }
-            if !urls.isEmpty {
-                pb.writeObjects(urls as [NSURL])
+            let resolved = item.resolveFiles()
+            defer { resolved.endAccess() }
+            if !resolved.urls.isEmpty {
+                pb.writeObjects(resolved.urls as [NSURL])
                 wrote = true
             }
         case .unknown:
@@ -143,6 +143,7 @@ final class ClipboardMonitor: ObservableObject {
            ]) as? [URL],
            !urls.isEmpty {
             let paths = urls.map(\.path)
+            let bookmarks = ClipboardItem.bookmarks(for: urls)
             let preview = paths.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
             let hash = hashString("files:" + paths.joined(separator: "\n"))
             return ClipboardItem(
@@ -151,6 +152,7 @@ final class ClipboardMonitor: ObservableObject {
                 sourceBundleID: bundleID,
                 sourceAppName: appName,
                 filePaths: paths,
+                fileBookmarks: bookmarks,
                 contentHash: hash
             )
         }
@@ -182,7 +184,29 @@ final class ClipboardMonitor: ObservableObject {
             }
         }
 
-        // Plain text
+        // Prefer RTF before plain string. Most rich-text pasteboards also publish
+        // public.utf8-plain-text; checking string first would always win as Text.
+        // Content is still stored as plain text (no formatting preserved).
+        if settings.captureRichText,
+           let rtfData = pb.data(forType: .rtf),
+           let attr = try? NSAttributedString(
+               data: rtfData,
+               options: [.documentType: NSAttributedString.DocumentType.rtf],
+               documentAttributes: nil
+           ) {
+            let string = attr.string
+            if !string.isEmpty {
+                return ClipboardItem(
+                    kind: .richText,
+                    preview: String(string.prefix(500)),
+                    sourceBundleID: bundleID,
+                    sourceAppName: appName,
+                    text: string,
+                    contentHash: hashString("rtf:" + string)
+                )
+            }
+        }
+
         if settings.captureText, let string = pb.string(forType: .string), !string.isEmpty {
             let preview = String(string.prefix(500))
             return ClipboardItem(
@@ -192,26 +216,6 @@ final class ClipboardMonitor: ObservableObject {
                 sourceAppName: appName,
                 text: string,
                 contentHash: hashString("text:" + string)
-            )
-        }
-
-        // RTF → plain
-        if settings.captureRichText,
-           let rtfData = pb.data(forType: .rtf),
-           let attr = try? NSAttributedString(
-               data: rtfData,
-               options: [.documentType: NSAttributedString.DocumentType.rtf],
-               documentAttributes: nil
-           ) {
-            let string = attr.string
-            guard !string.isEmpty else { return nil }
-            return ClipboardItem(
-                kind: .richText,
-                preview: String(string.prefix(500)),
-                sourceBundleID: bundleID,
-                sourceAppName: appName,
-                text: string,
-                contentHash: hashString("rtf:" + string)
             )
         }
 

@@ -21,15 +21,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let store = HistoryStore()
     private let monitor = ClipboardMonitor()
+    private let updateChecker = UpdateChecker()
 
     private var settingsObserver: NSObjectProtocol?
-    private var itemCountObserver: NSKeyValueObservation?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMainMenu()
         setupStatusItem()
         setupPopover()
         monitor.start(store: store)
+        registerHotKey()
 
         settingsObserver = NotificationCenter.default.addObserver(
             forName: .clipKeepSettingsChanged,
@@ -38,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             Task { @MainActor in
                 self?.updateStatusItemAppearance()
+                self?.registerHotKey()
             }
         }
 
@@ -53,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         monitor.stop()
+        HotKeyService.shared.unregister()
         if let settingsObserver {
             NotificationCenter.default.removeObserver(settingsObserver)
         }
@@ -122,6 +125,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.popover = popover
     }
 
+    private func registerHotKey() {
+        HotKeyService.shared.update(from: store.settings) { [weak self] in
+            self?.togglePopoverFromHotKey()
+        }
+    }
+
+    private func togglePopoverFromHotKey() {
+        guard let button = statusItem?.button, let popover else { return }
+        if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            popover.contentViewController?.view.window?.makeKey()
+        }
+    }
+
     @objc private func togglePopover(_ sender: Any?) {
         // Right-click → quick menu
         if let event = NSApp.currentEvent, event.type == .rightMouseUp {
@@ -135,7 +155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            // Keep key for search field
+            // Keep key for search field / keyboard navigation
             popover.contentViewController?.view.window?.makeKey()
         }
     }
@@ -151,8 +171,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let pauseTitle = monitor.isPaused ? "Resume Capturing" : "Pause Capturing"
         menu.addItem(withTitle: pauseTitle, action: #selector(togglePause), keyEquivalent: "")
         menu.addItem(withTitle: "Settings…", action: #selector(openSettingsAction), keyEquivalent: ",")
+        menu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        menu.addItem(withTitle: "View on GitHub", action: #selector(openGitHub), keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(withTitle: "Clear Unpinned", action: #selector(clearUnpinned), keyEquivalent: "")
+        let clearUnpinnedItem = NSMenuItem(
+            title: "Clear Unpinned (Keep Pinned)",
+            action: #selector(clearUnpinned),
+            keyEquivalent: ""
+        )
+        clearUnpinnedItem.isEnabled = store.unpinnedCount > 0
+        menu.addItem(clearUnpinnedItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "Quit ClipKeep", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         for item in menu.items {
@@ -170,6 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let button = statusItem?.button, let popover else { return }
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
     }
 
     @objc private func togglePause() {
@@ -183,6 +212,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func clearUnpinned() {
         store.clearUnpinned()
+    }
+
+    @objc private func checkForUpdates() {
+        updateChecker.checkForUpdatesPresentingAlert()
+    }
+
+    @objc private func openGitHub() {
+        updateChecker.openRepository()
     }
 
     private func copyItem(_ item: ClipboardItem) {
@@ -203,13 +240,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let root = SettingsView(
             store: store,
             monitor: monitor,
+            updateChecker: updateChecker,
             onClose: { [weak self] in
                 self?.settingsWindow?.close()
             }
         )
         let hosting = NSHostingController(rootView: root)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 640),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 700),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -243,6 +281,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(openSettingsAction),
             keyEquivalent: ","
         )
+        appMenu.addItem(
+            withTitle: "Check for Updates…",
+            action: #selector(checkForUpdates),
+            keyEquivalent: ""
+        )
+        appMenu.addItem(
+            withTitle: "View on GitHub",
+            action: #selector(openGitHub),
+            keyEquivalent: ""
+        )
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(
             withTitle: "Quit ClipKeep",
@@ -263,7 +311,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
         for item in appMenu.items {
-            if item.action == #selector(showAbout) || item.action == #selector(openSettingsAction) {
+            if item.action == #selector(showAbout)
+                || item.action == #selector(openSettingsAction)
+                || item.action == #selector(checkForUpdates)
+                || item.action == #selector(openGitHub)
+            {
                 item.target = self
             }
         }
@@ -274,8 +326,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showAbout() {
         let info: [NSApplication.AboutPanelOptionKey: Any] = [
             .applicationName: "ClipKeep",
-            .applicationVersion: "1.0.0",
-            .version: "1",
+            .applicationVersion: AppVersion.short,
+            .version: AppVersion.build,
             .credits: NSAttributedString(
                 string: "Menu bar clipboard history with privacy exclusions for password managers.",
                 attributes: [

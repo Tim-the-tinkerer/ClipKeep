@@ -1,14 +1,20 @@
+import AppKit
 import Foundation
 
 /// User preferences persisted with UserDefaults via Codable JSON.
-struct AppSettings: Codable, Equatable {
+///
+/// Decoding is migration-friendly: missing keys fall back to defaults so adding
+/// new non-optional fields does not wipe existing preferences.
+struct AppSettings: Equatable {
     /// Maximum unpinned history items retained.
     var maxHistoryCount: Int
+    /// Max total size of image payloads on disk (MB). 0 = unlimited. Pinned items never deleted by size trim.
+    var maxPayloadStorageMB: Int
     /// Poll interval for pasteboard changeCount (seconds).
     var pollInterval: Double
     /// Capture plain text.
     var captureText: Bool
-    /// Capture rich text (stored as plain for history).
+    /// Capture rich text (stored as plain text in history).
     var captureRichText: Bool
     /// Capture images (PNG).
     var captureImages: Bool
@@ -24,6 +30,12 @@ struct AppSettings: Codable, Equatable {
     var launchAtLogin: Bool
     /// Show count badge on menu bar icon.
     var showCountInMenuBar: Bool
+    /// Register a system-wide hotkey to open the history panel.
+    var globalHotkeyEnabled: Bool
+    /// Carbon / macOS virtual key code (e.g. 9 = V).
+    var globalHotkeyKeyCode: Int
+    /// Modifier flags raw value (`NSEvent.ModifierFlags` device-independent flags).
+    var globalHotkeyModifiers: Int
 
     static let defaultExcludedBundleIDs: [String] = [
         // 1Password
@@ -68,8 +80,15 @@ struct AppSettings: Codable, Equatable {
         "com.apple.passwordmanager",
     ].filter { $0 != "com.apple.Safari" }
 
+    /// Default hotkey: ⌘⇧V
+    static let defaultHotkeyKeyCode = 9 // kVK_ANSI_V
+    static let defaultHotkeyModifiers = Int(
+        NSEvent.ModifierFlags([.command, .shift]).intersection(.deviceIndependentFlagsMask).rawValue
+    )
+
     static let `default` = AppSettings(
         maxHistoryCount: 100,
+        maxPayloadStorageMB: 200,
         pollInterval: 0.4,
         captureText: true,
         captureRichText: true,
@@ -79,7 +98,10 @@ struct AppSettings: Codable, Equatable {
         excludeBySourceApp: true,
         excludedBundleIDs: defaultExcludedBundleIDs,
         launchAtLogin: false,
-        showCountInMenuBar: false
+        showCountInMenuBar: false,
+        globalHotkeyEnabled: true,
+        globalHotkeyKeyCode: defaultHotkeyKeyCode,
+        globalHotkeyModifiers: defaultHotkeyModifiers
     )
 
     static let storageKey = "ClipKeep.AppSettings"
@@ -112,5 +134,78 @@ struct AppSettings: Codable, Equatable {
 
     mutating func resetExcludedAppsToDefaults() {
         excludedBundleIDs = Self.defaultExcludedBundleIDs
+    }
+
+    var maxPayloadStorageBytes: Int64 {
+        guard maxPayloadStorageMB > 0 else { return 0 }
+        return Int64(maxPayloadStorageMB) * 1024 * 1024
+    }
+}
+
+// MARK: - Codable (forward-compatible)
+
+extension AppSettings: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case maxHistoryCount
+        case maxPayloadStorageMB
+        case pollInterval
+        case captureText
+        case captureRichText
+        case captureImages
+        case captureFiles
+        case respectConcealedPasteboard
+        case excludeBySourceApp
+        case excludedBundleIDs
+        case launchAtLogin
+        case showCountInMenuBar
+        case globalHotkeyEnabled
+        case globalHotkeyKeyCode
+        case globalHotkeyModifiers
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = Self.default
+        maxHistoryCount = try c.decodeIfPresent(Int.self, forKey: .maxHistoryCount) ?? d.maxHistoryCount
+        maxPayloadStorageMB = try c.decodeIfPresent(Int.self, forKey: .maxPayloadStorageMB) ?? d.maxPayloadStorageMB
+        pollInterval = try c.decodeIfPresent(Double.self, forKey: .pollInterval) ?? d.pollInterval
+        captureText = try c.decodeIfPresent(Bool.self, forKey: .captureText) ?? d.captureText
+        captureRichText = try c.decodeIfPresent(Bool.self, forKey: .captureRichText) ?? d.captureRichText
+        captureImages = try c.decodeIfPresent(Bool.self, forKey: .captureImages) ?? d.captureImages
+        captureFiles = try c.decodeIfPresent(Bool.self, forKey: .captureFiles) ?? d.captureFiles
+        respectConcealedPasteboard = try c.decodeIfPresent(Bool.self, forKey: .respectConcealedPasteboard)
+            ?? d.respectConcealedPasteboard
+        excludeBySourceApp = try c.decodeIfPresent(Bool.self, forKey: .excludeBySourceApp)
+            ?? d.excludeBySourceApp
+        excludedBundleIDs = try c.decodeIfPresent([String].self, forKey: .excludedBundleIDs)
+            ?? d.excludedBundleIDs
+        launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? d.launchAtLogin
+        showCountInMenuBar = try c.decodeIfPresent(Bool.self, forKey: .showCountInMenuBar)
+            ?? d.showCountInMenuBar
+        globalHotkeyEnabled = try c.decodeIfPresent(Bool.self, forKey: .globalHotkeyEnabled)
+            ?? d.globalHotkeyEnabled
+        globalHotkeyKeyCode = try c.decodeIfPresent(Int.self, forKey: .globalHotkeyKeyCode)
+            ?? d.globalHotkeyKeyCode
+        globalHotkeyModifiers = try c.decodeIfPresent(Int.self, forKey: .globalHotkeyModifiers)
+            ?? d.globalHotkeyModifiers
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(maxHistoryCount, forKey: .maxHistoryCount)
+        try c.encode(maxPayloadStorageMB, forKey: .maxPayloadStorageMB)
+        try c.encode(pollInterval, forKey: .pollInterval)
+        try c.encode(captureText, forKey: .captureText)
+        try c.encode(captureRichText, forKey: .captureRichText)
+        try c.encode(captureImages, forKey: .captureImages)
+        try c.encode(captureFiles, forKey: .captureFiles)
+        try c.encode(respectConcealedPasteboard, forKey: .respectConcealedPasteboard)
+        try c.encode(excludeBySourceApp, forKey: .excludeBySourceApp)
+        try c.encode(excludedBundleIDs, forKey: .excludedBundleIDs)
+        try c.encode(launchAtLogin, forKey: .launchAtLogin)
+        try c.encode(showCountInMenuBar, forKey: .showCountInMenuBar)
+        try c.encode(globalHotkeyEnabled, forKey: .globalHotkeyEnabled)
+        try c.encode(globalHotkeyKeyCode, forKey: .globalHotkeyKeyCode)
+        try c.encode(globalHotkeyModifiers, forKey: .globalHotkeyModifiers)
     }
 }

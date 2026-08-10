@@ -17,7 +17,9 @@ if [[ ! -f Assets/AppIcon.icns ]]; then
     swift Scripts/GenerateAppIcon.swift
 fi
 
-echo "Building ClipKeep 1.0.0 (release)..."
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' AppInfo.plist 2>/dev/null || echo unknown)"
+BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' AppInfo.plist 2>/dev/null || echo unknown)"
+echo "Building ClipKeep ${VERSION} (build ${BUILD}, release)..."
 swift build -c release
 
 echo "Assembling ${APP}..."
@@ -37,7 +39,7 @@ xattr -cr "${APP}" 2>/dev/null || true
 codesign --force --sign - --timestamp=none "${APP}/Contents/MacOS/ClipKeep"
 codesign --force --sign - --timestamp=none "${APP}"
 
-echo "Done: ${APP} (v1.0.0)"
+echo "Done: ${APP} (v${VERSION} build ${BUILD})"
 if [[ "${LAUNCH}" == "true" ]]; then
     echo "Launching..."
     open "${APP}"

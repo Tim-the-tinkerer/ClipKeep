@@ -4,10 +4,15 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var store: HistoryStore
     @ObservedObject var monitor: ClipboardMonitor
+    @ObservedObject var updateChecker: UpdateChecker
     var onClose: () -> Void
 
     @State private var newBundleID = ""
     @State private var showResetConfirm = false
+    @State private var showClearUnpinnedConfirm = false
+    @State private var showClearAllConfirm = false
+    @State private var isRecordingHotkey = false
+    @State private var hotkeyMonitor: Any?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -31,12 +36,66 @@ struct SettingsView: View {
                     ) {
                         Text("Max items: \(store.settings.maxHistoryCount)")
                     }
+                    Text("Applies to unpinned clips only. Pinned clips are never dropped by this limit.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Stepper(
+                        value: binding(\.maxPayloadStorageMB),
+                        in: 0...2000,
+                        step: 50
+                    ) {
+                        Text(
+                            store.settings.maxPayloadStorageMB == 0
+                                ? "Image storage: unlimited"
+                                : "Image storage: \(store.settings.maxPayloadStorageMB) MB"
+                        )
+                    }
+                    Text(payloadStorageCaption)
+                        .font(.caption)
+                        .foregroundStyle(store.isPayloadBudgetExceeded ? .orange : .secondary)
 
                     Toggle("Capture text", isOn: binding(\.captureText))
-                    Toggle("Capture rich text", isOn: binding(\.captureRichText))
+                    Toggle("Capture rich text (stored as plain)", isOn: binding(\.captureRichText))
+                    Text("RTF is detected before plain text when both are on the pasteboard. Formatting is not preserved.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     Toggle("Capture images", isOn: binding(\.captureImages))
                     Toggle("Capture file lists", isOn: binding(\.captureFiles))
                     Toggle("Show count in menu bar", isOn: binding(\.showCountInMenuBar))
+                }
+
+                Section("Keyboard") {
+                    Toggle("Global hotkey", isOn: binding(\.globalHotkeyEnabled))
+                    HStack {
+                        Text("Shortcut")
+                        Spacer()
+                        Button {
+                            beginRecordingHotkey()
+                        } label: {
+                            Text(
+                                isRecordingHotkey
+                                    ? "Press shortcut…"
+                                    : HotKeyService.displayString(
+                                        keyCode: store.settings.globalHotkeyKeyCode,
+                                        modifiers: store.settings.globalHotkeyModifiers
+                                    )
+                            )
+                            .monospacedDigit()
+                            .frame(minWidth: 100)
+                        }
+                        .disabled(!store.settings.globalHotkeyEnabled)
+                        Button("Reset") {
+                            var s = store.settings
+                            s.globalHotkeyKeyCode = AppSettings.defaultHotkeyKeyCode
+                            s.globalHotkeyModifiers = AppSettings.defaultHotkeyModifiers
+                            store.settings = s
+                        }
+                        .disabled(!store.settings.globalHotkeyEnabled)
+                    }
+                    Text("Default is ⌘⇧V. Opens or closes the history panel from anywhere. Arrow keys, Return (copy), and Delete work while the panel is open.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("Privacy & exclusions") {
@@ -153,17 +212,70 @@ struct SettingsView: View {
                 }
 
                 Section("Danger zone") {
-                    Button("Clear unpinned history", role: .destructive) {
-                        store.clearUnpinned()
+                    Button("Clear unpinned history…", role: .destructive) {
+                        showClearUnpinnedConfirm = true
                     }
-                    Button("Clear all history", role: .destructive) {
-                        store.clearAll()
+                    .disabled(store.unpinnedCount == 0)
+                    Text(
+                        store.pinnedCount == 0
+                            ? "Removes all history items."
+                            : "Removes unpinned items only. \(store.pinnedCount) pinned clip(s) will be kept."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                    Button("Clear all history…", role: .destructive) {
+                        showClearAllConfirm = true
                     }
+                    .disabled(store.items.isEmpty)
+                    Text("Removes every item, including pinned clips and image payloads.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Updates") {
+                    LabeledContent("Version", value: AppVersion.display)
+                    Text(updateChecker.status.summary)
+                        .font(.caption)
+                        .foregroundStyle(updateStatusColor)
+                    HStack {
+                        Button {
+                            updateChecker.checkForUpdates()
+                        } label: {
+                            if case .checking = updateChecker.status {
+                                Text("Checking…")
+                            } else {
+                                Text("Check for Updates")
+                            }
+                        }
+                        .disabled({
+                            if case .checking = updateChecker.status { return true }
+                            return false
+                        }())
+
+                        if case .updateAvailable = updateChecker.status {
+                            Button("Get Update…") {
+                                updateChecker.openUpdateDestination()
+                            }
+                            .keyboardShortcut(.defaultAction)
+                        }
+                    }
+                    HStack {
+                        Button("Open GitHub") {
+                            updateChecker.openRepository()
+                        }
+                        Button("Releases") {
+                            updateChecker.openReleases()
+                        }
+                    }
+                    Text("Updates are published at \(AppLinks.repository.absoluteString). ClipKeep checks the latest GitHub release tag and opens the project page — it does not auto-download or install.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
                 }
 
                 Section("About") {
-                    LabeledContent("Version", value: "1.0.0")
-                    Text("History is stored only on this Mac under Application Support/ClipKeep. Secrets from excluded apps and concealed pasteboards are never written to disk.")
+                    Text("History metadata is stored under Application Support/ClipKeep; images as files in Payloads/. ClipKeep avoids storing secrets marked as concealed or copied while an excluded application is detected — protection is best-effort, not absolute.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -171,7 +283,7 @@ struct SettingsView: View {
             .formStyle(.grouped)
             .padding(.bottom, 8)
         }
-        .frame(width: 520, height: 640)
+        .frame(width: 520, height: 700)
         .alert("Reset excluded apps?", isPresented: $showResetConfirm) {
             Button("Cancel", role: .cancel) {}
             Button("Reset", role: .destructive) {
@@ -182,11 +294,34 @@ struct SettingsView: View {
         } message: {
             Text("Restore the built-in list of password managers and related apps.")
         }
+        .alert("Clear unpinned history?", isPresented: $showClearUnpinnedConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Clear Unpinned", role: .destructive) {
+                store.clearUnpinned()
+            }
+        } message: {
+            Text(
+                store.pinnedCount == 0
+                    ? "Remove all \(store.unpinnedCount) history item(s). Nothing is pinned."
+                    : "Remove \(store.unpinnedCount) unpinned item(s). \(store.pinnedCount) pinned clip(s) will be kept."
+            )
+        }
+        .alert("Clear all history?", isPresented: $showClearAllConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Clear All", role: .destructive) {
+                store.clearAll()
+            }
+        } message: {
+            Text("This removes every item, including pinned clips. This cannot be undone.")
+        }
         .onChange(of: store.settings.pollInterval) { _ in
             monitor.restartTimer()
         }
         .onChange(of: store.settings.showCountInMenuBar) { _ in
             NotificationCenter.default.post(name: .clipKeepSettingsChanged, object: nil)
+        }
+        .onDisappear {
+            endRecordingHotkey()
         }
     }
 
@@ -203,6 +338,78 @@ struct SettingsView: View {
 
     private func friendlyName(for bundleID: String) -> String? {
         ExclusionService.knownPasswordManagerCatalog.first { $0.bundleID == bundleID }?.name
+    }
+
+    private func formattedBytes(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
+    private var updateStatusColor: Color {
+        switch updateChecker.status {
+        case .updateAvailable:
+            return .orange
+        case .failed:
+            return .red
+        case .upToDate:
+            return .secondary
+        case .checking:
+            return .secondary
+        default:
+            return .secondary
+        }
+    }
+
+    private var payloadStorageCaption: String {
+        let used = formattedBytes(store.payloadStorageBytes)
+        var text =
+            "PNG payloads live under Application Support/ClipKeep/Payloads/. Using \(used)"
+        if store.settings.maxPayloadStorageMB == 0 {
+            text += ". Size auto-trim is off."
+        } else {
+            text +=
+                ". Oldest unpinned images (only) are removed when over budget; text clips are never deleted to free image space."
+        }
+        if store.isPayloadBudgetExceeded {
+            text += " Currently over budget — likely pinned images, which are never auto-removed."
+        }
+        return text
+    }
+
+    private func beginRecordingHotkey() {
+        isRecordingHotkey = true
+        endRecordingHotkey(clearStateOnly: true)
+        hotkeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // Escape cancels
+            if event.keyCode == 53 {
+                DispatchQueue.main.async {
+                    endRecordingHotkey()
+                }
+                return nil
+            }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            // Require at least one modifier for global hotkeys
+            guard !flags.isEmpty, !flags.intersection([.command, .option, .control]).isEmpty else {
+                return nil
+            }
+            var s = store.settings
+            s.globalHotkeyKeyCode = Int(event.keyCode)
+            s.globalHotkeyModifiers = Int(flags.rawValue)
+            store.settings = s
+            DispatchQueue.main.async {
+                endRecordingHotkey()
+            }
+            return nil
+        }
+    }
+
+    private func endRecordingHotkey(clearStateOnly: Bool = false) {
+        if let hotkeyMonitor {
+            NSEvent.removeMonitor(hotkeyMonitor)
+            self.hotkeyMonitor = nil
+        }
+        if !clearStateOnly {
+            isRecordingHotkey = false
+        }
     }
 }
 

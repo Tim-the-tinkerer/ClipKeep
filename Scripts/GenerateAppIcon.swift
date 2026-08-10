@@ -148,22 +148,30 @@ let assets = root.appendingPathComponent("Assets")
 let iconset = assets.appendingPathComponent("AppIcon.iconset")
 try? fm.createDirectory(at: iconset, withIntermediateDirectories: true)
 
-let sizes: [(Int, String)] = [
+// Apple iconutil requires this exact naming inside *.iconset:
+//   icon_<pt>x<pt>.png      → 1x (logical point size)
+//   icon_<pt>x<pt>@2x.png   → 2x retina (pixel size = 2 * point size)
+// The "@2x" suffix is Apple's retina scale marker (not an email address).
+// Built with "\u{0040}2x" in source so the scale token stays unambiguous.
+// https://developer.apple.com/library/archive/documentation/GraphicsAnimation/Conceptual/HighResolutionOSX/Optimizing/Optimizing.html
+private let retina = "\u{0040}2x" // → "@2x"
+
+let sizes: [(pixels: Int, filename: String)] = [
     (16, "icon_16x16.png"),
-    (32, "diana.k@example.org"),
+    (32, "icon_16x16\(retina).png"),   // 16pt @2x → 32px
     (32, "icon_32x32.png"),
-    (64, "ivan.p@example.net"),
+    (64, "icon_32x32\(retina).png"),   // 32pt @2x → 64px
     (128, "icon_128x128.png"),
-    (256, "wendy.h@example.net"),
+    (256, "icon_128x128\(retina).png"), // 128pt @2x → 256px
     (256, "icon_256x256.png"),
-    (512, "wendy.h@example.net"),
+    (512, "icon_256x256\(retina).png"), // 256pt @2x → 512px
     (512, "icon_512x512.png"),
-    (1024, "walt.e@example.net"),
+    (1024, "icon_512x512\(retina).png"), // 512pt @2x → 1024px
 ]
 
-for (px, name) in sizes {
-    if let img = renderIcon(size: px) {
-        writePNG(img, to: iconset.appendingPathComponent(name))
+for entry in sizes {
+    if let img = renderIcon(size: entry.pixels) {
+        writePNG(img, to: iconset.appendingPathComponent(entry.filename))
     }
 }
 
