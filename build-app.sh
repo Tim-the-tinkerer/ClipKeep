@@ -22,6 +22,15 @@ BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' AppInfo.plist 2>/de
 echo "Building ClipKeep ${VERSION} (build ${BUILD}, release)..."
 swift build -c release
 
+BIN=".build/release/ClipKeep"
+if [[ ! -x "${BIN}" ]]; then
+    echo "error: expected binary not found at ${BIN}" >&2
+    exit 1
+fi
+
+echo "Running self-test..."
+"${BIN}" --self-test
+
 echo "Assembling ${APP}..."
 rm -rf "${APP}"
 mkdir -p "${APP}/Contents/MacOS"

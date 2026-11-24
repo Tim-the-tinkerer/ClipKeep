@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.3] — 2026-11-23
+
+### Fixed
+- **Shared images** — Deleting or clearing one clip keeps the PNG when another clip still uses it. A repeated copy keeps the picture when the payload file could not be saved.
+- **Copy** — Copying a clip that no longer has its file or its image leaves the clipboard as it was.
+- **Payload paths** — A history entry can only name a UUID file inside Payloads. ClipKeep does not follow a name that points somewhere else.
+- **Menu bar menu** — Quit works. Clear Unpinned asks before removing clips.
+- **Shortcut recording** — The current global hotkey is suspended while a new shortcut is recorded, then restored.
+- **Launch at login** — The Settings switch matches the login item when Settings opens.
+
+## [1.2.2] — 2026-11-23
+
+### Fixed
+- **Import image budget** — Replace measures the image storage limit from the payloads the incoming history names. Images that fit are kept. PNGs from the previous history are removed only after the new history is saved.
+- **Import save failure** — If `history.json` cannot be saved, import reports the error and leaves the previous history and its images in place.
+- **Identical image files** — Two copied files with the same pixels and different paths stay separate clips, including image files upgraded from older history. Copying the same path again still updates that clip.
+
+## [1.2.1] — 2026-11-23
+
+### Fixed
+- **Image payloads** — Copying an image file, such as a JPEG from Finder, now writes a PNG under `Application Support/ClipKeep/Payloads/`. The original path is kept, so the file can still be pasted. Screenshots and other copied pictures are saved from the pasteboard image data. On launch, a history entry that is a single image file is snapshotted into Payloads when that file is still readable.
+
+## [1.2.0] — 2026-11-23
+
+### Added
+- **Export History** and **Import History** — a `.clipkeep` file (CLIPKEEP/1) holds every clip: text, images, pins, and file references. Export writes that file where you choose. Import can merge clips that are not already here, or replace the current history with the file. Settings stay on this Mac. The file is not uploaded. Available from Settings, the app menu, the menu bar menu, and by opening a `.clipkeep` file.
+
 ## [1.1.2] — 2026-08-09
 
 ### Added
@@ -69,6 +96,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pause capture, settings (max size, capture toggles, launch at login, menu bar count).
 - App bundle packaging via `build-app.sh`.
 
+[1.2.3]: https://github.com/Tim-the-tinkerer/ClipKeep/compare/v1.2.2...v1.2.3
+[1.2.2]: https://github.com/Tim-the-tinkerer/ClipKeep/compare/v1.2.1...v1.2.2
+[1.2.1]: https://github.com/Tim-the-tinkerer/ClipKeep/compare/v1.2.0...v1.2.1
+[1.2.0]: https://github.com/Tim-the-tinkerer/ClipKeep/compare/v1.1.2...v1.2.0
 [1.1.2]: https://github.com/Tim-the-tinkerer/ClipKeep/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/Tim-the-tinkerer/ClipKeep/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/Tim-the-tinkerer/ClipKeep/compare/v1.0.2...v1.1.0

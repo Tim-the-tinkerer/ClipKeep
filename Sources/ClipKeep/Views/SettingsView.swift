@@ -65,6 +65,18 @@ struct SettingsView: View {
                     Toggle("Show count in menu bar", isOn: binding(\.showCountInMenuBar))
                 }
 
+                Section("History file") {
+                    Button("Export History…") {
+                        HistoryTransfer.exportHistory(store: store)
+                    }
+                    Button("Import History…") {
+                        HistoryTransfer.importHistory(store: store)
+                    }
+                    Text("A .clipkeep file holds every clip: text, images, pins, and file references. Export writes that file where you choose. Import reads one back. Settings stay on this Mac.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Keyboard") {
                     Toggle("Global hotkey", isOn: binding(\.globalHotkeyEnabled))
                     HStack {
@@ -283,7 +295,7 @@ struct SettingsView: View {
             .formStyle(.grouped)
             .padding(.bottom, 8)
         }
-        .frame(width: 520, height: 700)
+        .frame(width: 520, height: 760)
         .alert("Reset excluded apps?", isPresented: $showResetConfirm) {
             Button("Cancel", role: .cancel) {}
             Button("Reset", role: .destructive) {
@@ -313,6 +325,14 @@ struct SettingsView: View {
             }
         } message: {
             Text("This removes every item, including pinned clips. This cannot be undone.")
+        }
+        .onAppear {
+            let actual = LaunchAtLogin.isEnabled
+            if store.settings.launchAtLogin != actual {
+                var s = store.settings
+                s.launchAtLogin = actual
+                store.settings = s
+            }
         }
         .onChange(of: store.settings.pollInterval) { _ in
             monitor.restartTimer()
@@ -378,6 +398,8 @@ struct SettingsView: View {
     private func beginRecordingHotkey() {
         isRecordingHotkey = true
         endRecordingHotkey(clearStateOnly: true)
+        // The current global hotkey would swallow the keys used to record a new one.
+        HotKeyService.shared.unregister()
         hotkeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             // Escape cancels
             if event.keyCode == 53 {
@@ -409,6 +431,7 @@ struct SettingsView: View {
         }
         if !clearStateOnly {
             isRecordingHotkey = false
+            NotificationCenter.default.post(name: .clipKeepSettingsChanged, object: nil)
         }
     }
 }

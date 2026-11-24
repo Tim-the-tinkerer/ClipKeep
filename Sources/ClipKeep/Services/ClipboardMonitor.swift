@@ -1,5 +1,4 @@
 import AppKit
-import CryptoKit
 import Foundation
 
 /// Polls the general pasteboard and records new content into HistoryStore.
@@ -49,42 +48,45 @@ final class ClipboardMonitor: ObservableObject {
     }
 
     /// Copy a history item back to the pasteboard without re-recording as new if identical.
+    /// The clipboard is left unchanged when the clip has nothing left to paste.
     func copyToPasteboard(_ item: ClipboardItem) {
         let pb = NSPasteboard.general
-        pb.clearContents()
+        guard write(item, to: pb) else { return }
+        ignoreNextChangeCount = pb.changeCount
+        ignoreContentHash = item.contentHash
+        // Promote to top of history
+        store?.add(item)
+    }
 
-        var wrote = false
+    /// Place `item` on `pasteboard`. Returns false without clearing when the clip has no pasteable content.
+    @discardableResult
+    func write(_ item: ClipboardItem, to pasteboard: NSPasteboard) -> Bool {
         switch item.kind {
-        case .text, .richText:
-            if let text = item.text {
-                pb.setString(text, forType: .string)
-                wrote = true
-            }
+        case .text, .richText, .unknown:
+            guard let text = item.text, !text.isEmpty else { return false }
+            pasteboard.clearContents()
+            return pasteboard.setString(text, forType: .string)
         case .image:
+            let resolved = item.resolveFiles()
+            defer { resolved.endAccess() }
             let data = store?.imageData(for: item) ?? item.imagePNGData
-            if let data, let image = NSImage(data: data) {
-                pb.writeObjects([image])
+            let hasPNG = data?.isEmpty == false
+            if resolved.urls.isEmpty && !hasPNG { return false }
+            pasteboard.clearContents()
+            var wrote = false
+            if !resolved.urls.isEmpty {
+                wrote = pasteboard.writeObjects(resolved.urls as [NSURL])
+            }
+            if let data, !data.isEmpty, pasteboard.setData(data, forType: .png) {
                 wrote = true
             }
+            return wrote
         case .files:
             let resolved = item.resolveFiles()
             defer { resolved.endAccess() }
-            if !resolved.urls.isEmpty {
-                pb.writeObjects(resolved.urls as [NSURL])
-                wrote = true
-            }
-        case .unknown:
-            if let text = item.text {
-                pb.setString(text, forType: .string)
-                wrote = true
-            }
-        }
-
-        if wrote {
-            ignoreNextChangeCount = pb.changeCount
-            ignoreContentHash = item.contentHash
-            // Promote to top of history
-            store?.add(item)
+            guard !resolved.urls.isEmpty else { return false }
+            pasteboard.clearContents()
+            return pasteboard.writeObjects(resolved.urls as [NSURL])
         }
     }
 
@@ -113,75 +115,44 @@ final class ClipboardMonitor: ObservableObject {
             return
         }
 
-        guard let item = makeItem(from: pb, frontmost: front, settings: store.settings) else {
-            return
-        }
-
-        if let ignoreHash = ignoreContentHash, ignoreHash == item.contentHash {
-            ignoreContentHash = nil
-            return
-        }
+        let items = makeItems(from: pb, frontmost: front, settings: store.settings)
+        let fresh = items.filter { $0.contentHash != ignoreContentHash }
         ignoreContentHash = nil
+        guard !fresh.isEmpty else { return }
 
-        store.add(item)
+        // Insert so the first clip ends up at the top.
+        for item in fresh.reversed() {
+            store.add(item)
+        }
         lastCapturedAt = Date()
         lastSkipReason = nil
     }
 
-    private func makeItem(
+    private func makeItems(
         from pb: NSPasteboard,
         frontmost: NSRunningApplication?,
         settings: AppSettings
-    ) -> ClipboardItem? {
+    ) -> [ClipboardItem] {
         let bundleID = frontmost?.bundleIdentifier
         let appName = frontmost?.localizedName
 
-        // Prefer files if present
-        if settings.captureFiles,
-           let urls = pb.readObjects(forClasses: [NSURL.self], options: [
-               .urlReadingFileURLsOnly: true
-           ]) as? [URL],
-           !urls.isEmpty {
-            let paths = urls.map(\.path)
-            let bookmarks = ClipboardItem.bookmarks(for: urls)
-            let preview = paths.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
-            let hash = hashString("files:" + paths.joined(separator: "\n"))
-            return ClipboardItem(
-                kind: .files,
-                preview: preview.isEmpty ? "\(paths.count) file(s)" : preview,
-                sourceBundleID: bundleID,
-                sourceAppName: appName,
-                filePaths: paths,
-                fileBookmarks: bookmarks,
-                contentHash: hash
-            )
-        }
-
-        // Images
-        if settings.captureImages,
-           let image = pb.readObjects(forClasses: [NSImage.self], options: nil)?.first as? NSImage,
-           let tiff = image.tiffRepresentation,
-           let rep = NSBitmapImageRep(data: tiff),
-           let png = rep.representation(using: .png, properties: [:]) {
-            // Avoid treating pure-text pasteboards that also advertise image as images
-            let hasString = pb.string(forType: .string) != nil
-            let types = pb.types ?? []
-            let looksLikeImage = types.contains(.png)
-                || types.contains(.tiff)
-                || types.contains(NSPasteboard.PasteboardType("public.png"))
-                || types.contains(NSPasteboard.PasteboardType("public.tiff"))
-            if looksLikeImage && !(hasString && !types.contains(.png) && !types.contains(.tiff)) {
-                let hash = hashData(png)
-                let sizeLabel = "\(Int(image.size.width))×\(Int(image.size.height))"
-                return ClipboardItem(
-                    kind: .image,
-                    preview: "Image \(sizeLabel)",
-                    sourceBundleID: bundleID,
-                    sourceAppName: appName,
-                    imagePNGData: png,
-                    contentHash: hash
-                )
-            }
+        let fileURLs = pb.readObjects(forClasses: [NSURL.self], options: [
+            .urlReadingFileURLsOnly: true
+        ]) as? [URL] ?? []
+        let imagesOnly = !fileURLs.isEmpty && fileURLs.allSatisfy(ImageCapture.isImageFile)
+        let inlineImage: Data? = settings.captureImages && (fileURLs.isEmpty || imagesOnly)
+            ? ImageCapture.inlineData(from: pb)
+            : nil
+        let captured = ImageCapture.makeItems(
+            fileURLs: fileURLs,
+            inlineImage: inlineImage,
+            captureImages: settings.captureImages,
+            captureFiles: settings.captureFiles,
+            sourceBundleID: bundleID,
+            sourceAppName: appName
+        )
+        if !captured.isEmpty {
+            return captured
         }
 
         // Prefer RTF before plain string. Most rich-text pasteboards also publish
@@ -196,39 +167,37 @@ final class ClipboardMonitor: ObservableObject {
            ) {
             let string = attr.string
             if !string.isEmpty {
-                return ClipboardItem(
-                    kind: .richText,
-                    preview: String(string.prefix(500)),
-                    sourceBundleID: bundleID,
-                    sourceAppName: appName,
-                    text: string,
-                    contentHash: hashString("rtf:" + string)
-                )
+                return [
+                    ClipboardItem(
+                        kind: .richText,
+                        preview: String(string.prefix(500)),
+                        sourceBundleID: bundleID,
+                        sourceAppName: appName,
+                        text: string,
+                        contentHash: hashString("rtf:" + string)
+                    )
+                ]
             }
         }
 
         if settings.captureText, let string = pb.string(forType: .string), !string.isEmpty {
             let preview = String(string.prefix(500))
-            return ClipboardItem(
-                kind: .text,
-                preview: preview,
-                sourceBundleID: bundleID,
-                sourceAppName: appName,
-                text: string,
-                contentHash: hashString("text:" + string)
-            )
+            return [
+                ClipboardItem(
+                    kind: .text,
+                    preview: preview,
+                    sourceBundleID: bundleID,
+                    sourceAppName: appName,
+                    text: string,
+                    contentHash: hashString("text:" + string)
+                )
+            ]
         }
 
-        return nil
+        return []
     }
 
     private func hashString(_ value: String) -> String {
-        let digest = SHA256.hash(data: Data(value.utf8))
-        return digest.map { String(format: "%02x", $0) }.joined()
-    }
-
-    private func hashData(_ data: Data) -> String {
-        let digest = SHA256.hash(data: data)
-        return digest.map { String(format: "%02x", $0) }.joined()
+        ImageCapture.digest(Data(value.utf8))
     }
 }
